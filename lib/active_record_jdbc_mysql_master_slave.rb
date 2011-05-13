@@ -33,22 +33,11 @@ module ActiveRecord
     
     module JdbcAdapterMysqlMasterSlaveMethods
 
+      # When included, interject our _execute method around the original
       def self.included(mod)
         mod.class_eval do  
-          alias_method :initialize_without_master_slave, :initialize 
-          alias_method :initialize, :initialize_with_master_slave
-        end
-      end
-
-      def initialize_with_master_slave(connection, logger, config)
-        initialize_without_master_slave(connection, logger, config)
-
-        # alias the _execute method only for the mysql adapter
-        if config[:adapter] =~ /mysql/
-          class << self
-            alias_method :_execute_without_master_slave, :_execute
-            alias_method :_execute, :_execute_with_master_slave
-          end
+          alias_method :_execute_without_master_slave, :_execute
+          alias_method :_execute, :_execute_with_master_slave
         end
       end
 
@@ -57,6 +46,18 @@ module ActiveRecord
       # the query... which will permit the query to be load-balanced
       # amongst the slaves by the mysql connector/j ReplicationDriver
       def _execute_with_master_slave(sql, name=nil)
+        # The old version would patch the initialize, but that posed an issue
+        # in Rails 2.3 where the adapter would be initialized before the plugins
+        # loaded, so instead we do this step on first use.
+        if @_master_slave_in_use.nil?
+          # Only do the instrumentation if the adapter mentioned mysql
+          @_master_slave_in_use = config[:adapter] =~ /mysql/
+        end
+        return _execute_without_master_slave(sql, name) unless @_master_slave_in_use
+
+        # Need to set the read_only option on the raw connection
+        # to tell the underlying driver whether the request can
+        # go to slaves.
         cro = raw_connection.connection.read_only
         begin
           raw_connection.connection.read_only = 
